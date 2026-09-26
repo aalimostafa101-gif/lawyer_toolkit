@@ -39,15 +39,29 @@ def analyze_contract(text: str) -> dict:
     contract_snippet = text[:25000] if len(text) > 25000 else text
     prompt = f"{SYSTEM_PROMPT}\n\n{USER_PROMPT_TEMPLATE.format(contract_text=contract_snippet)}"
 
-    candidate_models = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-pro"]
-    last_error = ""
+    # جلب النماذج المدعومة فعلياً في حسابك من Google
+    available_models = []
+    try:
+        for m in genai.list_models():
+            if "generateContent" in m.supported_generation_methods:
+                available_models.append(m.name)
+    except Exception as e:
+        return {"error": f"فشل التحقق من مفتاح API أو جلب النماذج: {str(e)}"}
 
-    for model_name in candidate_models:
+    if not available_models:
+        return {"error": "لم يتم العثور على أي نموذج يدعم generateContent في هذا الحساب."}
+
+    # تفضيل النماذج الأسرع (Flash) أولاً
+    flash_models = [m for m in available_models if "flash" in m.lower()]
+    other_models = [m for m in available_models if "flash" not in m.lower()]
+    models_to_try = flash_models + other_models
+
+    last_error = ""
+    for model_name in models_to_try:
         try:
             model = genai.GenerativeModel(
                 model_name=model_name,
                 generation_config={
-                    "temperature": 0.1,
                     "response_mime_type": "application/json",
                 }
             )
@@ -55,13 +69,13 @@ def analyze_contract(text: str) -> dict:
             response = model.generate_content(prompt)
             response_text = response.text.strip()
 
-            # محاولة فك JSON مباشرة
+            # 1. فك JSON مباشر
             try:
                 return json.loads(response_text)
             except json.JSONDecodeError:
                 pass
 
-            # تنظيف علامات الماركداون
+            # 2. تنظيف Markdown code blocks
             cleaned = re.sub(r"^```(?:json)?\s*", "", response_text, flags=re.MULTILINE)
             cleaned = re.sub(r"```\s*$", "", cleaned, flags=re.MULTILINE).strip()
             try:
@@ -69,7 +83,7 @@ def analyze_contract(text: str) -> dict:
             except json.JSONDecodeError:
                 pass
 
-            # البحث عن أقواس JSON
+            # 3. استخراج JSON عبر Regex
             match = re.search(r"(\{[\s\S]*\})", response_text)
             if match:
                 try:
@@ -77,7 +91,7 @@ def analyze_contract(text: str) -> dict:
                 except json.JSONDecodeError:
                     pass
 
-            last_error = f"{model_name}: لم يتم استخراج JSON صالح"
+            last_error = f"{model_name}: استجابة غير صالحة"
 
         except Exception as e:
             last_error = f"{model_name} - {str(e)}"
