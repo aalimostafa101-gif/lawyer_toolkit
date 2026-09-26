@@ -7,11 +7,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# قائمة النماذج الأكثر استقراراً ودعماً
 GEMINI_MODELS = [
     "gemini-2.5-flash",
-    "gemini-1.5-flash",
-    "gemini-1.5-pro"
+    "gemini-2.0-flash",
+    "gemini-1.5-flash-latest",
+    "gemini-1.5-flash-8b",
 ]
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
