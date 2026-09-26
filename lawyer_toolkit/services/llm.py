@@ -7,18 +7,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-SYSTEM_PROMPT = """أنت مساعد قانوني محايد متخصص في تحليل العقود العربية.
-مهمتك فقط استخراج المعلومات من العقد دون إبداء أي رأي أو حكم قانوني.
-لا تقدم نصائح قانونية. فقط استخرج وصنّف المعلومات.
-يجب أن يكون الرد بصيغة JSON صحيحة فقط بدون أي نصوص تمهيدية أو ختامية."""
-
-USER_PROMPT_TEMPLATE = """حلّل العقد التالي واستخرج منه بدقة:
-1. ملخص قصير (3-5 جمل)
-2. أطراف العقد
-3. البنود الحساسة (شروط جزائية، غرامات، شروط فسخ، التزامات مالية)
-
-العقد:
-{contract_text}"""
+SYSTEM_PROMPT = """أنت خبير قانوني ومساعد محايد في تدقيق وتحليل العقود العربية.
+استخرج من العقد المُعطى البيانات المطلوبة بدقة تامة وبصيغة JSON حصراً.
+يجب أن يحتوي الرد على هذه المفاتيح بالضبط:
+- "summary": نص من عدة جمل يلخص جوهر العقد والالتزامات الرئيسية.
+- "parties": قائمة بأسماء الأطراف المذكورة في العقد (مصفوفة نصوص).
+- "sensitive_clauses": قائمة بالبنود الحساسة (شروط جزائية، غرامات، صلاحيات فسخ، مبالغ وتأمينات). كل عنصر كائن يحتوي على:
+    * "type": نوع البند (غرامة / شرط جزائي / فسخ / التزام مالي / أخرى)
+    * "text": النص الحرفي للبند أو ملخصه
+    * "location": رقم البند أو مكانه في العقد
+"""
 
 def get_api_key() -> str:
     api_key = os.getenv("GEMINI_API_KEY")
@@ -32,69 +30,56 @@ def get_api_key() -> str:
 def analyze_contract(text: str) -> dict:
     api_key = get_api_key()
     if not api_key:
-        return {"error": "مفتاح API غير موجود. يرجى إضافة GEMINI_API_KEY في إعدادات Secrets."}
+        return {"error": "مفتاح API غير متوفر في النظام."}
+
+    if not text or len(text.strip()) < 10:
+        return {"error": "النص المدخل فارغ أو قصير جداً للتحليل."}
 
     genai.configure(api_key=api_key)
 
-    contract_snippet = text[:25000] if len(text) > 25000 else text
-    prompt = f"{SYSTEM_PROMPT}\n\n{USER_PROMPT_TEMPLATE.format(contract_text=contract_snippet)}"
+    prompt = f"{SYSTEM_PROMPT}\n\nنص العقد للتحليل:\n\"\"\"\n{text}\n\"\"\"\n\nأرجع JSON فقط:"
 
-    # جلب النماذج المدعومة فعلياً في حسابك من Google
-    available_models = []
-    try:
-        for m in genai.list_models():
-            if "generateContent" in m.supported_generation_methods:
-                available_models.append(m.name)
-    except Exception as e:
-        return {"error": f"فشل التحقق من مفتاح API أو جلب النماذج: {str(e)}"}
-
-    if not available_models:
-        return {"error": "لم يتم العثور على أي نموذج يدعم generateContent في هذا الحساب."}
-
-    # تفضيل النماذج الأسرع (Flash) أولاً
-    flash_models = [m for m in available_models if "flash" in m.lower()]
-    other_models = [m for m in available_models if "flash" not in m.lower()]
-    models_to_try = flash_models + other_models
-
+    # النماذج الأكثر انتشاراً للتوليد
+    models_to_try = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash", "gemini-2.5-flash"]
+    
     last_error = ""
     for model_name in models_to_try:
         try:
-            model = genai.GenerativeModel(
-                model_name=model_name,
-                generation_config={
-                    "response_mime_type": "application/json",
-                }
-            )
-
+            model = genai.GenerativeModel(model_name=model_name)
             response = model.generate_content(prompt)
-            response_text = response.text.strip()
+            
+            if not response or not response.text:
+                continue
 
-            # 1. فك JSON مباشر
+            raw = response.text.strip()
+            
+            # تنظيف علامات الماركداون
+            cleaned = re.sub(r"^```(?:json)?", "", raw, flags=re.MULTILINE)
+            cleaned = re.sub(r"```$", "", cleaned, flags=re.MULTILINE).strip()
+
+            data = None
             try:
-                return json.loads(response_text)
-            except json.JSONDecodeError:
-                pass
+                data = json.loads(cleaned)
+            except Exception:
+                # استخراج أول كتلة JSON بواسطة regex
+                match = re.search(r"(\{[\s\S]*\})", raw)
+                if match:
+                    data = json.loads(match.group(1))
 
-            # 2. تنظيف Markdown code blocks
-            cleaned = re.sub(r"^```(?:json)?\s*", "", response_text, flags=re.MULTILINE)
-            cleaned = re.sub(r"```\s*$", "", cleaned, flags=re.MULTILINE).strip()
-            try:
-                return json.loads(cleaned)
-            except json.JSONDecodeError:
-                pass
+            if isinstance(data, dict):
+                # التأكد من المفاتيح أو جلب بدائلها
+                summary = data.get("summary") or data.get("ملخص") or data.get("contract_summary") or ""
+                parties = data.get("parties") or data.get("أطراف") or data.get("parties_involved") or []
+                clauses = data.get("sensitive_clauses") or data.get("بنود_حساسة") or data.get("clauses") or []
 
-            # 3. استخراج JSON عبر Regex
-            match = re.search(r"(\{[\s\S]*\})", response_text)
-            if match:
-                try:
-                    return json.loads(match.group(1))
-                except json.JSONDecodeError:
-                    pass
-
-            last_error = f"{model_name}: استجابة غير صالحة"
+                return {
+                    "summary": summary if summary else "تم تحليل العقد ولكن لم يُذكر ملخص صريح.",
+                    "parties": parties,
+                    "sensitive_clauses": clauses
+                }
 
         except Exception as e:
-            last_error = f"{model_name} - {str(e)}"
+            last_error = f"{model_name}: {str(e)}"
             continue
 
-    return {"error": f"تعذر إكمال التحليل ({last_error})."}
+    return {"error": f"تعذر استخراج البيانات ({last_error})"}
