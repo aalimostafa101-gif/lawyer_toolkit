@@ -1,85 +1,101 @@
-import json
-import os
-import re
-import streamlit as st
-import google.generativeai as genai
-from dotenv import load_dotenv
+"""
+services/llm.py
+-----------------
+تحليل عقود عربية عبر Gemini API (Google).
 
-load_dotenv()
-
-SYSTEM_PROMPT = """أنت خبير قانوني ومساعد محايد في تدقيق وتحليل العقود العربية.
-استخرج من العقد المُعطى البيانات المطلوبة بدقة تامة وبصيغة JSON حصراً.
-يجب أن يحتوي الرد على هذه المفاتيح بالضبط:
-- "summary": نص من عدة جمل يلخص جوهر العقد والالتزامات الرئيسية.
-- "parties": قائمة بأسماء الأطراف المذكورة في العقد (مصفوفة نصوص).
-- "sensitive_clauses": قائمة بالبنود الحساسة (شروط جزائية، غرامات، صلاحيات فسخ، مبالغ وتأمينات). كل عنصر كائن يحتوي على:
-    * "type": نوع البند (غرامة / شرط جزائي / فسخ / التزام مالي / أخرى)
-    * "text": النص الحرفي للبند أو ملخصه
-    * "location": رقم البند أو مكانه في العقد
+نسخة تشخيصية: بتجرب كل موديل في القائمة، وبدل ما تورينا خطأ آخر موديل بس
+(اللي بيبقى مضلل)، بتجمع خطأ كل موديل على حدة وتوريهم كلهم عشان نعرف
+بالظبط ليه gemini-3.8-flash نفسه بيفشل.
 """
 
-def get_api_key() -> str:
-    api_key = os.getenv("GEMINI_API_KEY")
+import json
+import os
+
+from google import genai
+from google.genai import types
+
+PRIMARY_MODEL = "gemini-3.8-flash"
+FALLBACK_MODELS = ["gemini-3.5-flash", "gemini-2.5-flash"]
+
+SYSTEM_PROMPT = """\
+أنت مساعد يقرأ عقود قانونية مكتوبة بالعربية ومهمتك تلخيص العقد ولفت نظر
+المستخدم إلى البنود التي تحتوي على التزامات أو أرقام أو شروط واضحة، فقط.
+
+قواعد صارمة يجب الالتزام بها:
+- لا تُصدر أي حكم قانوني على عدالة أو صحة أي بند.
+- لا تقارن العقد بأي "معيار قانوني" افتراضي.
+- ركّز فقط على البنود التي تحتوي على واحد أو أكثر من التالي بشكل صريح
+  في نص العقد: غرامات مالية أو تأخير، شروط فسخ أو إنهاء العقد،
+  التزامات مالية (مبالغ، دفعات، ضمانات)، مدد زمنية حرجة (مواعيد نهائية).
+- إذا لم يوجد بند من هذا النوع، أعد قائمة فارغة بدل اختلاق بنود.
+- أعد الإجابة بصيغة JSON فقط بدون أي نص إضافي قبله أو بعده، وبنفس أسماء
+  الحقول التالية حرفيًا:
+
+{
+  "summary": "ملخص قصير للعقد في 3-5 جمل بالعربية الفصحى البسيطة",
+  "parties": ["الطرف الأول (كما ورد في العقد)", "الطرف الثاني (كما ورد في العقد)"],
+  "sensitive_clauses": [
+    {
+      "type": "غرامة تأخير | شرط فسخ | التزام مالي | مدة حرجة | أخرى",
+      "text": "نص البند أو تلخيص دقيق له",
+      "location": "رقم البند/المادة كما ورد في العقد، أو وصف مختصر لموضعه"
+    }
+  ]
+}
+"""
+
+
+def _clean_json_text(raw_text: str) -> str:
+    """يشيل أي ```json``` أو ``` حوالين رد الموديل قبل الـ parsing."""
+    text = (raw_text or "").strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.lower().startswith("json"):
+            text = text[4:]
+        text = text.strip()
+    return text
+
+
+def analyze_contract(contract_text: str, api_key: str) -> dict:
+    """
+    بيرجع dict فيه: summary, parties, sensitive_clauses
+    بيجرب PRIMARY_MODEL الأول، ولو فشل يجرب الموديلات الاحتياطية بالترتيب.
+    لو الكل فشل، بيرفع خطأ واحد فيه تفاصيل فشل كل موديل على حدة (مش آخر واحد بس).
+    """
     if not api_key:
+        raise RuntimeError("لازم تدخل مفتاح Gemini API (GOOGLE_API_KEY).")
+
+    trimmed_text = contract_text[:40000]
+    client = genai.Client(api_key=api_key)
+
+    errors_per_model = []  # هنجمع هنا خطأ كل موديل بالتفصيل
+
+    for model_name in [PRIMARY_MODEL, *FALLBACK_MODELS]:
         try:
-            api_key = st.secrets.get("GEMINI_API_KEY", "")
-        except Exception:
-            pass
-    return api_key
+            response = client.models.generate_content(
+                model=model_name,
+                contents=trimmed_text,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    response_mime_type="application/json",
+                ),
+            )
+            cleaned = _clean_json_text(response.text)
+            data = json.loads(cleaned)
 
-def analyze_contract(text: str) -> dict:
-    api_key = get_api_key()
-    if not api_key:
-        return {"error": "مفتاح API غير متوفر في النظام."}
+            data.setdefault("summary", "")
+            data.setdefault("parties", [])
+            data.setdefault("sensitive_clauses", [])
+            data["_model_used"] = model_name
+            return data
 
-    if not text or len(text.strip()) < 10:
-        return {"error": "النص المدخل فارغ أو قصير جداً للتحليل."}
-
-    genai.configure(api_key=api_key)
-
-    prompt = f"{SYSTEM_PROMPT}\n\nنص العقد للتحليل:\n\"\"\"\n{text}\n\"\"\"\n\nأرجع JSON فقط:"
-
-    # النماذج الأكثر انتشاراً للتوليد
-    models_to_try = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash", "gemini-2.5-flash"]
-    
-    last_error = ""
-    for model_name in models_to_try:
-        try:
-            model = genai.GenerativeModel(model_name=model_name)
-            response = model.generate_content(prompt)
-            
-            if not response or not response.text:
-                continue
-
-            raw = response.text.strip()
-            
-            # تنظيف علامات الماركداون
-            cleaned = re.sub(r"^```(?:json)?", "", raw, flags=re.MULTILINE)
-            cleaned = re.sub(r"```$", "", cleaned, flags=re.MULTILINE).strip()
-
-            data = None
-            try:
-                data = json.loads(cleaned)
-            except Exception:
-                # استخراج أول كتلة JSON بواسطة regex
-                match = re.search(r"(\{[\s\S]*\})", raw)
-                if match:
-                    data = json.loads(match.group(1))
-
-            if isinstance(data, dict):
-                # التأكد من المفاتيح أو جلب بدائلها
-                summary = data.get("summary") or data.get("ملخص") or data.get("contract_summary") or ""
-                parties = data.get("parties") or data.get("أطراف") or data.get("parties_involved") or []
-                clauses = data.get("sensitive_clauses") or data.get("بنود_حساسة") or data.get("clauses") or []
-
-                return {
-                    "summary": summary if summary else "تم تحليل العقد ولكن لم يُذكر ملخص صريح.",
-                    "parties": parties,
-                    "sensitive_clauses": clauses
-                }
-
-        except Exception as e:
-            last_error = f"{model_name}: {str(e)}"
+        except Exception as e:  # noqa: BLE001
+            # بنسجل نوع الخطأ ورسالته كاملة لكل موديل، مش بس آخر واحد
+            errors_per_model.append(f"[{model_name}] {type(e).__name__}: {e}")
             continue
 
-    return {"error": f"تعذر استخراج البيانات ({last_error})"}
+    details = "\n".join(errors_per_model)
+    raise RuntimeError(
+        "فشل التحليل بكل الموديلات المتاحة. تفاصيل كل موديل على حدة:\n"
+        f"{details}"
+    )

@@ -68,21 +68,21 @@ if st.button("⚡ حلّل العقد", disabled=disabled_analyze):
         st.error("مفتاح GEMINI_API_KEY مفقود، يرجى إضافته في إعدادات Secrets.")
     else:
         with st.spinner("جاري تحليل العقد بواسطة الذكاء الاصطناعي... يرجى الانتظار ⏳"):
-            result = analyze_contract(current_text)
-            if "error" in result:
-                st.error(result["error"])
-            else:
+            try:
+                result = analyze_contract(current_text, api_key)
                 st.session_state['analysis_result'] = result
+            except Exception as e:
+                st.error(f"حصل خطأ أثناء التحليل: {e}")
 
 # عرض النتائج
 if 'analysis_result' in st.session_state:
     result = st.session_state['analysis_result']
-    
+
     # 1. الملخص
     summary = result.get("summary") or result.get("ملخص") or "لا يوجد ملخص متاح."
     st.subheader("📋 الملخص")
     st.info(summary)
-    
+
     # 2. أطراف العقد
     parties = result.get("parties") or result.get("أطراف") or []
     st.subheader("👥 أطراف العقد")
@@ -91,7 +91,7 @@ if 'analysis_result' in st.session_state:
             st.markdown(f"- {party}")
     else:
         st.markdown("لم يتم العثور على أطراف.")
-        
+
     # 3. البنود الحساسة
     clauses = result.get("sensitive_clauses") or result.get("بنود_حساسة") or []
     st.subheader("⚠️ البنود الحساسة")
@@ -105,7 +105,7 @@ if 'analysis_result' in st.session_state:
                 clause_type = "بند"
                 text = str(clause)
                 location = ""
-            
+
             color = "#808080"
             if "غرامة" in str(clause_type) or "جزائي" in str(clause_type):
                 color = "#ff4b4b"
@@ -113,7 +113,7 @@ if 'analysis_result' in st.session_state:
                 color = "#ffa500"
             elif "التزام" in str(clause_type) or "مالي" in str(clause_type):
                 color = "#2196f3"
-                
+
             card_html = f"""
             <div style="border-right: 4px solid {color}; padding: 10px; margin-bottom: 10px; background-color: #f8f9fa; border-radius: 5px;" dir="rtl">
                 <span style="background-color: {color}; color: white; padding: 2px 8px; border-radius: 10px; font-size: 0.8em; margin-bottom: 5px; display: inline-block;">{clause_type}</span>
@@ -124,7 +124,7 @@ if 'analysis_result' in st.session_state:
             st.markdown(card_html, unsafe_allow_html=True)
     else:
         st.markdown("لم يتم العثور على بنود حساسة.")
-        
+
     # تحميل التقرير بصيغة PDF
     try:
         pdf_bytes = generate_report(result)
